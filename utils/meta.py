@@ -1,7 +1,7 @@
 import pandas as pd
 from enum import Enum
 from osgeo import gdal, gdalconst
-from typing import Iterable, Literal, Optional, Tuple
+from typing import Iterable, Literal, Optional, Sequence, Tuple, Union
 
 
 class RATConst(Enum):
@@ -137,3 +137,16 @@ class RAT(object):
                 field=idx,
                 start=row_count
             )
+
+
+def gdal_extensions(driver: Union[str, gdal.Driver]) -> Sequence[str]:
+    if isinstance(driver, str):
+        driver = gdal.GetDriverByName(driver)
+    if not isinstance(driver, gdal.Driver):
+        raise ValueError("Driver is invalid!")
+
+    exts = driver.GetMetadataItem("DMD_EXTENSIONS")
+    # noinspection PyPropertyAccess
+    return exts.split(" ") if exts else [
+        driver.ShortName.replace(' ', '.').lower()
+    ]

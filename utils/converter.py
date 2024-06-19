@@ -1,6 +1,9 @@
 import re
+import fiona
+import pandas as pd
 from osgeo import gdal
 from lxml import etree
+import geopandas as gpd
 from pathlib import Path
 from zipfile import ZipFile
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -59,86 +62,35 @@ def multi_replace(text: str, phrase_map: Dict[str, str]):
     return text
 
 
-def translate(
+def convert_datetime(
         src_path: Union[str, Path],
-        dst_path: Union[str, Path],
-        src_drivers: Optional[Tuple[str]] = tuple(["GML"]),
-        src_options: Optional[Union[Tuple[str], Dict[str, Any]]] = (
-            "WRITE_GFS=NO",
-            "FORCE_SRS_DETECTION=NO",
-            "EMPTY_AS_NULL=YES",
-            "SWAP_COORDINATES=AUTO",
-            "READ_MODE=AUTO",
-            "CONSIDER_EPSG_AS_URN=AUTO",
-            "EXPOSE_FID=AUTO",
-            "DOWNLOAD_SCHEMA=NO"
-        ),
-        translate_options: Optional[
-            gdal.VectorTranslateOptions
-        ] = gdal.VectorTranslateOptions(
-            format="GPKG",
-            accessMode=None,
-            srcSRS="EPSG:28992",
-            dstSRS="EPSG:28992",
-            reproject=False,
-            geometryType="CONVERT_TO_LINEAR",
-            dim="XY",
-            clipSrc=None,
-            makeValid=True,
-            skipFailures=False,
-            callback=None,
+        format_map: Dict[str, Dict[str, str]],  # {attr: {"format": "%Y-%m-%d", "tz": "Europe/Amsterdam"}}
+        layer: Optional[Union[str, int]] = None,
+        dst_path: Optional[Union[str, Path]] = None,  # None => Inplace
+        dst_driver: Optional[str] = None,  # "FlatGeobuf"
+):
+    src_path = Path(src_path).expanduser().absolute()
+    if dst_path is None:
+        dst_path = src_path
+    else:
+        dst_path = Path(dst_path).expanduser().absolute()
+    gdf = gpd.read_file(filename=src_path, layer=layer, )
+    for attr, params in format_map.items():
+        fmt = params.pop("format", None)
+        gdf[attr] = pd.to_datetime(
+            gdf[attr],
+            format=fmt,
+            errors='coerce'
         )
-) -> None:
-    src_path = Path(src_path)
-    dst_path = Path(dst_path)
-
-    # # -----------------------
-
-    xml_namespaces = {
-        "xsi": "http://www.w3.org/2001/XMLSchema-instance"
-    }
-    schema_urls = {
-        "imgeo.xsd": "https://register.geostandaarden.nl/gmlapplicatieschema/imgeo/2.1.1/imgeo.xsd",
-        "imgeo-simple-2.1-gml31.xsd": "https://register.geostandaarden.nl/gmlapplicatieschema/imgeo/2.1.1/imgeo-simple.xsd"
-    }
-
-    tree = etree.parse(source=src_path)
-    schema_locations = tree.getroot().xpath(
-        _path="//*[@xsi:schemaLocation]",
-        namespaces=xml_namespaces
-    )
-
-    for element in schema_locations:
-        key = f"{{{xml_namespaces['xsi']}}}schemaLocation"
-        element.set(
-            key,
-            multi_replace(
-                text=element.get(key),
-                phrase_map=schema_urls
+        if "tz" in params.keys():
+            gdf[attr].dt.tz_localize(
+                **params
+                # tz=params["tz"],
+                # ambiguous=params.get("ambiguous", "infer"),
+                # nonexistent=params.get("nonexistent", "shift_forward")
             )
-        )
-
-    tree.write(
-        file=src_path,
-        xml_declaration=True,
-        pretty_print=True,
-        encoding="utf-8"
-    )
-
-    # # -----------------------
-
-    with gdal.OpenEx(
-        utf8_path=src_path.absolute(),
-        nOpenFlags=gdal.OF_VECTOR,
-        allowed_drivers=src_drivers,
-        open_options=src_options
-    ) as src:
-        gdal.VectorTranslate(
-            # destNameOrDestDS=str(dst_path.absolute()),
-            destNameOrDestDS=str(dst_path.absolute()),
-            srcDS=src,
-            options=translate_options
-        )
+    gdf.to_file(filename=dst_path, layer=layer, driver=dst_driver)
+    return dst_path
 
 
 def vector_translate(
@@ -161,7 +113,7 @@ def vector_translate(
     with gdal.OpenEx(
         utf8_path=str(src_path),
         nOpenFlags=gdal.OF_VECTOR,
-        # **extra_opts
+        **extra_opts
     ) as src:
         if src_crs is None:
             srs = src.GetLayer().GetSpatialRef()
@@ -228,15 +180,17 @@ def bgt_convert(
     }
 
     # gdal.VectorTranslate
-    bgt_zip = Path(bgt_zip)
+    bgt_zip = Path(bgt_zip).expanduser().absolute()
     with ZipFile(file=bgt_zip, mode="r") as zfp:
         if dst_dir is None:
             dst_dir = bgt_zip.parent
-        dst_dir = Path(dst_dir)
+        dst_dir = Path(dst_dir).expanduser().absolute()
         dst_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
         dst_map = dict()
         for file_name in zfp.namelist():
-            src_path = Path(zfp.extract(member=file_name, path=dst_dir))
+            src_path = Path(
+                zfp.extract(member=file_name, path=dst_dir)
+            ).expanduser().absolute()
             layer_name = src_path.stem.split(
                 sep="_",
                 maxsplit=1
@@ -264,7 +218,7 @@ def bgt_convert(
                 )
 
             with gdal.OpenEx(
-                utf8_path=str(src_path.absolute()),
+                utf8_path=str(src_path),
                 nOpenFlags=gdal.OF_VECTOR,
                 allowed_drivers=["GML"],
                 open_options=[
@@ -288,7 +242,7 @@ def bgt_convert(
                     )
 
             with gdal.OpenEx(
-                utf8_path=str(src_path.absolute()),
+                utf8_path=str(src_path),
                 nOpenFlags=gdal.OF_VECTOR,
                 allowed_drivers=["GML"],
                 open_options=[
@@ -311,11 +265,12 @@ def bgt_convert(
                 if dst_crs is None:
                     dst_crs = src_crs
                 reproject = (src_crs != dst_crs)
-                dst_path = src_path.with_suffix(f".{dst_driver.lower()}")
+                dst_path = src_path.with_suffix(
+                    f".{dst_driver.lower()}"
+                ).expanduser().absolute()
             gdal.VectorTranslate(
-                destNameOrDestDS=str(dst_path.absolute()),
-                # srcDS=src,
-                srcDS=str(src_path.absolute()),
+                destNameOrDestDS=str(dst_path),
+                srcDS=str(src_path),
                 options=gdal.VectorTranslateOptions(
                     format=dst_driver,
                     accessMode=None,
@@ -324,13 +279,51 @@ def bgt_convert(
                     reproject=reproject,
                     geometryType=("CONVERT_TO_LINEAR", 'PROMOTE_TO_MULTI'),
                     dim="XY",
-                    # where="OGR_GEOMETRY IN ('POLYGON', 'MULTIPOLYGON')",
                     clipSrc=clip_src,
                     makeValid=True,
                     skipFailures=False,
                     callback=None,
                 )
             )
+            for layer in fiona.listlayers(src_path):
+                convert_datetime(
+                    src_path=dst_path,
+                    layer=layer,
+                    format_map={
+                        "objectBeginTijd": {
+                            "format": None,
+                            "tz": "Europe/Amsterdam",
+                            "ambiguous": "infer",
+                            "nonexistent": "shift_forward"
+                        },
+                        "objectEindTijd": {
+                            "format": None,
+                            "tz": "Europe/Amsterdam",
+                            "ambiguous": "infer",
+                            "nonexistent": "shift_forward"
+                        },
+                        "tijdstipRegistratie": {
+                            "format": None,
+                            "tz": "Europe/Amsterdam",
+                            "ambiguous": "infer",
+                            "nonexistent": "shift_forward"
+                        },
+                        "eindRegistratie": {
+                            "format": None,
+                            "tz": "Europe/Amsterdam",
+                            "ambiguous": "infer",
+                            "nonexistent": "shift_forward"
+                        },
+                        "LV-publicatiedatum": {
+                            "format": None,
+                            "tz": "Europe/Amsterdam",
+                            "ambiguous": "infer",
+                            "nonexistent": "shift_forward"
+                        }
+                    },
+                    dst_path=None,
+                    dst_driver=dst_driver
+                )
             dst_map[layer_name] = dst_path
             if clean_up:
                 src_path.unlink()

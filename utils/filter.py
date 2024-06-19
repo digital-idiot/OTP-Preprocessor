@@ -41,6 +41,49 @@ def alter_data(
     return src_path
 
 
+def filter_data(
+        src_path: Union[str, Path],
+        dst_path: Union[str, Path],
+        src_drivers: Optional[Sequence[str]] = None,
+        dst_driver: Optional[str] = None,
+        open_options: Optional[Union[Sequence[str], Dict[str, Any]]] = None,
+        filter_query: Optional[str] = None,
+        dialect: Optional[str] = "SQLITE"
+):
+
+    kwargs = dict()
+    src_path = Path(src_path).expanduser().absolute()
+    dst_path = Path(dst_path).expanduser().absolute()
+    layers = {
+        f"layer_{idx}": layer_name
+        for idx, layer_name in enumerate(fiona.listlayers(src_path))
+    }
+    layers["layer"] = layers["layer_0"]
+    filter_query = filter_query.format(**layers).strip()
+    kwargs["utf8_path"] = src_path
+    kwargs["nOpenFlags"] = gdal.OF_VECTOR
+    if src_drivers:
+        kwargs["allowed_drivers"] = src_drivers
+    if open_options:
+        kwargs["open_options"] = open_options
+    with gdal.OpenEx(**kwargs) as data_sink:
+        if dst_driver is None:
+            dst_driver = data_sink.GetDriver()
+        with data_sink.ExecuteSQL(
+            statement=filter_query,
+            dialect=dialect,
+            keep_ref_on_ds=True
+        ) as query_sink:
+            gdal.VectorTranslate(
+                destNameOrDestDS=str(dst_path),
+                srcDS=query_sink,
+                options=gdal.VectorTranslateOptions(
+                    format=dst_driver
+                )
+            )
+    return dst_path
+
+
 def prepare_data(
         src_path: Union[str, Path],
         geom_types: Optional[Union[Set[str], Sequence[str]]] = None,  # {"Polygon", "MultiPolygon", "Unknown"}
@@ -74,8 +117,6 @@ def prepare_data(
             )
             gdf = pd.concat(objs=[gdf, dummy], ignore_index=True)
         if new_attr is not None:
-            # print(default_fill)
-            # gdf[new_attr] = default_fill
             if isinstance(value_map, dict):
                 gdf[new_attr] = gdf[infer_attr].map(value_map).fillna(default_fill)
             else:
